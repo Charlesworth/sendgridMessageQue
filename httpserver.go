@@ -7,21 +7,15 @@ import (
 	"github.com/julienschmidt/httprouter"
 	"github.com/satori/go.uuid"
 	//"github.com/sendgrid/sendgrid-go"
+	"encoding/json"
 	"log"
 	"net/http"
+	"time"
 )
 
 //todo
 // - make a alerting que
 // - add twillio support
-
-//var RedisClient redis.Client
-var BoltClient *bolt.DB
-
-type alertSet struct {
-	UUID  string
-	score int
-}
 
 type message struct {
 	UUID           string
@@ -34,13 +28,15 @@ type message struct {
 
 var RedisChannel = make(chan message)
 var SendgridChannel = make(chan message)
+var BoltReadChannel = make(chan string)
+var BoltWriteChannel = make(chan message)
 
 func main() {
-	initializeClients()
-
 	go timeChecker()
 	go redisClient()
 	go sendgridClient()
+	go boltWriteClient()
+	go boltReadClient()
 
 	router := httprouter.New()
 	router.POST("/message", messageHandler)
@@ -50,7 +46,7 @@ func main() {
 	http.Handle("/", router)
 
 	log.Println("Listening...")
-	log.Fatal(http.ListenAndServe(":3000", nil))
+	log.Fatal(http.ListenAndServe(":8080", nil))
 }
 
 //******************************Handlers*********************************************************
@@ -59,7 +55,7 @@ func messageHandler(w http.ResponseWriter, r *http.Request, params httprouter.Pa
 	//unmarshall the JSON into message
 
 	m := message{
-		UUID:           "",
+		UUID:           "123",
 		score:          0,
 		recipientEmail: "charlie@test.com",
 		recipientName:  "charlie",
@@ -67,7 +63,10 @@ func messageHandler(w http.ResponseWriter, r *http.Request, params httprouter.Pa
 		text:           "this is a test",
 	}
 
-	SendgridChannel <- m
+	//SendgridChannel <- m
+	BoltWriteChannel <- m
+	time.Sleep(time.Second)
+	BoltReadChannel <- "123"
 }
 
 func alertHandler(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
@@ -102,17 +101,65 @@ func timeChecker() {
 	fmt.Println("time checker is a-go-go")
 }
 
-//initializeClients starts the clients for Redis, BoltDB and SendGrid
-func initializeClients() {
-	//initialize BoltDB client
-	//this will create messages.db file in the program directory if it
-	//doesn't already exist
-	BoltClient, err := bolt.Open("messages.db", 0600, nil)
+func boltWriteClient() {
+	boltClient, err := bolt.Open("messages.db", 0600, nil)
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer BoltClient.Close()
+	defer boltClient.Close()
 
+	//do we need to check a bucket exists or make one
+	boltClient.Update(func(tx *bolt.Tx) error {
+		// Create a bucket.
+		tx.CreateBucketIfNotExists([]byte("m"))
+		return nil
+	})
+
+	fmt.Println("bolt writer ready")
+
+	for {
+		m := <-BoltWriteChannel
+
+		mjson, err := json.Marshal(m)
+		errLog(err)
+
+		boltClient.Update(func(tx *bolt.Tx) error {
+			// Set the value "bar" for the key "foo".
+			err = tx.Bucket([]byte("m")).Put([]byte(m.UUID), []byte(mjson))
+			errLog(err)
+			return nil
+		})
+	}
+}
+
+func boltReadClient() {
+	boltClient, err := bolt.Open("messages.db", 0600, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer boltClient.Close()
+
+	fmt.Println("bolt reader ready")
+
+	for {
+		uuID := <-BoltReadChannel
+
+		var b []byte
+		boltClient.View(func(tx *bolt.Tx) error {
+			// Set the value "bar" for the key "foo".
+			b = tx.Bucket([]byte("m")).Get([]byte(uuID))
+			errLog(err)
+
+			return nil
+		})
+
+		var mjson message
+		err := json.Unmarshal(b, &mjson)
+		errLog(err)
+		fmt.Println("*************")
+		fmt.Println(mjson.text)
+		fmt.Println("*************")
+	}
 }
 
 func redisClient() {
