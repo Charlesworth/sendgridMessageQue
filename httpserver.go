@@ -10,29 +10,30 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
-	"time"
+	//"time"
 )
 
 //todo
 // - make a alerting que
 // - add twillio support
 
-type message struct {
+type Message struct {
 	UUID           string
-	score          int
-	recipientEmail string
-	recipientName  string
-	subject        string
-	text           string
+	Score          int
+	RecipientEmail string
+	RecipientName  string
+	Subject        string
+	Text           string
 }
 
-var RedisChannel = make(chan message)
-var SendgridChannel = make(chan message)
+var RedisChannel = make(chan Message)
+var SendgridChannel = make(chan Message)
 var BoltReadChannel = make(chan string)
-var BoltWriteChannel = make(chan message)
+var BoltWriteChannel = make(chan Message)
+var BoltDeleteChannel = make(chan string)
 
 func main() {
-	go timeChecker()
+	go alertManager()
 	go redisClient()
 	go sendgridClient()
 	go boltWriteClient()
@@ -40,7 +41,7 @@ func main() {
 
 	router := httprouter.New()
 	router.POST("/message", messageHandler)
-	router.POST("/alert/:time", alertHandler)
+	router.POST("/alert/:time", alertPostHandler)
 	router.DELETE("/alert/:time", alertDeleteHandler)
 
 	http.Handle("/", router)
@@ -54,26 +55,36 @@ func main() {
 func messageHandler(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
 	//unmarshall the JSON into message
 
-	m := message{
+	m := Message{
 		UUID:           "123",
-		score:          0,
-		recipientEmail: "charlie@test.com",
-		recipientName:  "charlie",
-		subject:        "test email",
-		text:           "this is a test",
+		Score:          0,
+		RecipientEmail: "charlie@test.com",
+		RecipientName:  "charlie",
+		Subject:        "test email",
+		Text:           "this is a test",
 	}
 
+	//	mjson, err := json.Marshal(m)
+	//	errLog(err)
+
+	//	var poo Message
+	//	err = json.Unmarshal(mjson, &poo)
+	//	fmt.Println("!")
+	//	fmt.Println(poo.RecipientName)
+
 	//SendgridChannel <- m
+
 	BoltWriteChannel <- m
-	time.Sleep(time.Second)
+	//time.Sleep(time.Second)
 	BoltReadChannel <- "123"
+	//BoltDeleteChannel <- "123"
 }
 
-func alertHandler(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
+func alertPostHandler(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
 	uID := uuid.NewV4().String()
 	fmt.Println(uID)
 
-	m := message{UUID: uID, score: 1}
+	m := Message{UUID: uID, Score: 1}
 
 	//add the UUID and score to the redis sorted set
 	RedisChannel <- m
@@ -90,7 +101,9 @@ func alertDeleteHandler(w http.ResponseWriter, r *http.Request, params httproute
 	//return 200
 }
 
-func timeChecker() {
+//******************************Alert Manager*********************************************************
+
+func alertManager() {
 	//for;;
 	//	redis(get top of set alerts score)
 	//	wait for score <= current time in millis
@@ -100,6 +113,8 @@ func timeChecker() {
 
 	fmt.Println("time checker is a-go-go")
 }
+
+//******************************Clients*********************************************************
 
 func boltWriteClient() {
 	boltClient, err := bolt.Open("messages.db", 0600, nil)
@@ -118,17 +133,25 @@ func boltWriteClient() {
 	fmt.Println("bolt writer ready")
 
 	for {
-		m := <-BoltWriteChannel
-
-		mjson, err := json.Marshal(m)
-		errLog(err)
-
-		boltClient.Update(func(tx *bolt.Tx) error {
-			// Set the value "bar" for the key "foo".
-			err = tx.Bucket([]byte("m")).Put([]byte(m.UUID), []byte(mjson))
+		select {
+		case m := <-BoltWriteChannel:
+			mjson, err := json.Marshal(m)
 			errLog(err)
-			return nil
-		})
+			boltClient.Update(func(tx *bolt.Tx) error {
+				// Set the value "bar" for the key "foo".
+				err = tx.Bucket([]byte("m")).Put([]byte(m.UUID), []byte(mjson))
+				errLog(err)
+				return nil
+			})
+
+		case m := <-BoltDeleteChannel:
+			boltClient.Update(func(tx *bolt.Tx) error {
+				// Set the value "bar" for the key "foo".
+				err = tx.Bucket([]byte("m")).Delete([]byte(m))
+				errLog(err)
+				return nil
+			})
+		}
 	}
 }
 
@@ -153,11 +176,11 @@ func boltReadClient() {
 			return nil
 		})
 
-		var mjson message
+		var mjson Message
 		err := json.Unmarshal(b, &mjson)
 		errLog(err)
 		fmt.Println("*************")
-		fmt.Println(mjson.text)
+		fmt.Println(mjson.Text)
 		fmt.Println("*************")
 	}
 }
@@ -177,7 +200,7 @@ func redisClient() {
 
 	for {
 		m := <-RedisChannel
-		result := redisClient.Cmd("ZADD", "alerts", m.score, m.UUID)
+		result := redisClient.Cmd("ZADD", "alerts", m.Score, m.UUID)
 		errLog(result.Err)
 		fmt.Println("job Done")
 	}
@@ -190,7 +213,7 @@ func sendgridClient() {
 
 	for {
 		m := <-SendgridChannel
-		fmt.Println(m.recipientEmail, m.recipientName, m.subject, m.text)
+		fmt.Println(m.RecipientEmail, m.RecipientName, m.Subject, m.Text)
 		//	message := sendgrid.NewMail()
 		//	message.AddTo(recipientEmail)
 		//	message.AddToName(recipientName)
@@ -204,6 +227,8 @@ func sendgridClient() {
 		//	}
 	}
 }
+
+//******************************Errors*********************************************************
 
 func errFatal(err error) {
 	if err != nil {
